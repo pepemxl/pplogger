@@ -1,17 +1,20 @@
-# PPLogger
+This module specifies common log for observability and monitoring of distribuited systems.
 
-A logger package for scaled distributed systems.
+Each module should log:
 
-The goal is to standarize logs in distribuited systems and permit scale logging process.
+- Things working fine
+- Errors
+- Exceptions
 
-This package converts log records into JSON messages.
+Also enable debug mode.
+
+This module converts log records into JSON messages.
 
 An example of a log file:
-- `/tmp/service_api.module_pepe_logs.2024_07_13.log`
+- /tmp/service_api.module_pepe_logs.2024_07_13.log
 
 Example of usage:
 
-```python
     import logging
     from pplogger import initializer_logger
 
@@ -22,4 +25,3 @@ Example of usage:
     log.debug("This log info message")
     log.error("This log error message")
     log.exception("This log exception message")
-```

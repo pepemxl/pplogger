@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -186,6 +187,98 @@ func TestEscapeMeasurement(t *testing.T) {
 	// commas and spaces are escaped, '=' is not.
 	if got, want := escapeMeasurement(`a,b c=d`), `a\,b\ c=d`; got != want {
 		t.Errorf("escapeMeasurement = %q, want %q", got, want)
+	}
+}
+
+func TestMetricsString(t *testing.T) {
+	m := metrics{shipped: 5, dropped: 1, malformed: 2, batches: 3, spooled: 4}
+	want := "shipped=5 dropped=1 malformed=2 batches=3 spooled=4"
+	if got := m.String(); got != want {
+		t.Errorf("metrics.String() = %q, want %q", got, want)
+	}
+}
+
+func TestSpoolBatchAndReplay(t *testing.T) {
+	dir := t.TempDir()
+	if err := spoolBatch(dir, "logs x=1i 1"); err != nil {
+		t.Fatalf("spoolBatch: %v", err)
+	}
+	if err := spoolBatch(dir, "logs x=2i 2"); err != nil {
+		t.Fatalf("spoolBatch: %v", err)
+	}
+
+	var hits int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&hits, 1)
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer srv.Close()
+
+	cfg := config{endpoint: srv.URL, spoolDir: dir, maxRetries: 1, retryBackoff: time.Millisecond}
+	n, err := replaySpoolOnce(context.Background(), srv.Client(), cfg)
+	if err != nil {
+		t.Fatalf("replaySpoolOnce: %v", err)
+	}
+	if n != 2 {
+		t.Errorf("replayed %d, want 2", n)
+	}
+	if got := atomic.LoadInt32(&hits); got != 2 {
+		t.Errorf("server hit %d times, want 2", got)
+	}
+	left, _ := filepath.Glob(filepath.Join(dir, "*"+spoolExt))
+	if len(left) != 0 {
+		t.Errorf("expected spool dir drained, %d file(s) left", len(left))
+	}
+}
+
+func TestReplaySpoolStopsOnRetryableFailure(t *testing.T) {
+	dir := t.TempDir()
+	if err := spoolBatch(dir, "logs x=1i 1"); err != nil {
+		t.Fatalf("spoolBatch: %v", err)
+	}
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	defer srv.Close()
+
+	cfg := config{endpoint: srv.URL, spoolDir: dir, maxRetries: 0, retryBackoff: time.Millisecond}
+	n, err := replaySpoolOnce(context.Background(), srv.Client(), cfg)
+	if err == nil {
+		t.Fatal("expected error on persistent 503, got nil")
+	}
+	if n != 0 {
+		t.Errorf("replayed %d, want 0", n)
+	}
+	// The batch must survive for a later pass.
+	left, _ := filepath.Glob(filepath.Join(dir, "*"+spoolExt))
+	if len(left) != 1 {
+		t.Errorf("expected 1 spooled file retained, got %d", len(left))
+	}
+}
+
+func TestReplaySpoolDiscardsPermanentError(t *testing.T) {
+	dir := t.TempDir()
+	if err := spoolBatch(dir, "logs x=1i 1"); err != nil {
+		t.Fatalf("spoolBatch: %v", err)
+	}
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+	}))
+	defer srv.Close()
+
+	cfg := config{endpoint: srv.URL, spoolDir: dir, maxRetries: 3, retryBackoff: time.Millisecond}
+	n, err := replaySpoolOnce(context.Background(), srv.Client(), cfg)
+	if err != nil {
+		t.Fatalf("replaySpoolOnce: %v", err)
+	}
+	if n != 1 {
+		t.Errorf("replayed %d, want 1 (discarded)", n)
+	}
+	left, _ := filepath.Glob(filepath.Join(dir, "*"+spoolExt))
+	if len(left) != 0 {
+		t.Errorf("expected permanent-error batch discarded, %d left", len(left))
 	}
 }
 

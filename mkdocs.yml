@@ -1,0 +1,38 @@
+site_name: pplogger
+site_description: Structured logging for distributed systems — Python library + Go log shipper.
+repo_url: https://github.com/pepemxl/pplogger
+repo_name: pepemxl/pplogger
+
+theme:
+  name: material
+  palette:
+    - scheme: default
+      primary: indigo
+      toggle:
+        icon: material/weather-night
+        name: Switch to dark mode
+    - scheme: slate
+      primary: indigo
+      toggle:
+        icon: material/weather-sunny
+        name: Switch to light mode
+  features:
+    - navigation.instant
+    - navigation.top
+    - content.code.copy
+    - toc.integrate
+
+nav:
+  - Overview: index.md
+  - Python library: intro.md
+  - Go processor: processor.md
+
+markdown_extensions:
+  - admonition
+  - tables
+  - toc:
+      permalink: true
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.superfences
+  - pymdownx.inlinehilite

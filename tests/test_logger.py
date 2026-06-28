@@ -8,7 +8,6 @@ import logging
 from pathlib import Path
 
 import pytest
-
 from pplogger import build_log_path, initializer_logger
 
 
@@ -36,9 +35,7 @@ def test_build_log_path_format():
 
 
 def test_initializer_logger_emits_json(tmp_path):
-    log_path = initializer_logger(
-        service="svc", module="mod", log_dir=tmp_path, console=False
-    )
+    log_path = initializer_logger(service="svc", module="mod", log_dir=tmp_path, console=False)
     log = logging.getLogger("test.json")
     log.info("hello")
 
@@ -67,9 +64,7 @@ def test_debug_level_toggle(tmp_path):
 
 
 def test_exception_serialized(tmp_path):
-    log_path = initializer_logger(
-        service="svc", module="mod", log_dir=tmp_path, console=False
-    )
+    log_path = initializer_logger(service="svc", module="mod", log_dir=tmp_path, console=False)
     log = logging.getLogger("test.exc")
     try:
         raise ValueError("boom")
@@ -84,9 +79,7 @@ def test_exception_serialized(tmp_path):
 
 
 def test_extra_fields_preserved(tmp_path):
-    log_path = initializer_logger(
-        service="svc", module="mod", log_dir=tmp_path, console=False
-    )
+    log_path = initializer_logger(service="svc", module="mod", log_dir=tmp_path, console=False)
     logging.getLogger("test.extra").info("with extras", extra={"request_id": "abc-123"})
 
     record = _read_records(log_path)[0]

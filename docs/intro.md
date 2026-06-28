@@ -1,5 +1,8 @@
 # pplogger
 
+> For a complete catalog of every feature across both components, see the
+> [Features overview](index.md).
+
 Common logger for observability and monitoring of distributed systems.
 
 Every module emits structured JSON for:

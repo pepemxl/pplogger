@@ -33,6 +33,8 @@ cleanly into systemd / Docker:
 | `--flush-interval` | —                   | `2s`                   | Force-flush a partial batch after this duration.   |
 | `--poll-interval`| —                     | `250ms`                | How often to poll for new data at EOF.             |
 | `--from-start`   | —                     | `false`                | Read from the beginning instead of seeking to EOF. |
+| `--max-retries`  | —                     | `5`                    | Retries for a failed batch on retryable errors.    |
+| `--retry-backoff`| —                     | `500ms`                | Initial backoff; doubles per attempt, capped 30s.  |
 
 Send `SIGINT` or `SIGTERM` for graceful shutdown — the in-flight batch is
 flushed before exit.
@@ -98,7 +100,9 @@ WantedBy=multi-user.target
 ## Failure behavior
 
 - Bad JSON lines are skipped with a stderr log line; the tail continues.
-- HTTP failures (timeouts, non-2xx responses) are logged and the affected
-  batch is dropped — the shipper does not currently buffer to disk. Pair
-  with a remote write that has its own retry/queue if at-least-once delivery
-  is required.
+- HTTP failures are classified: **retryable** errors (network/timeout, HTTP 429
+  and 5xx) are retried with exponential backoff up to `--max-retries`;
+  **permanent** errors (other 4xx, e.g. malformed line protocol) are dropped
+  immediately. A batch that exhausts its retries is dropped with a stderr log
+  line — the shipper does not yet buffer to disk, so pair with a remote write
+  that has its own durable queue if strict at-least-once delivery is required.

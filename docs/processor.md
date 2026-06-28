@@ -35,6 +35,8 @@ cleanly into systemd / Docker:
 | `--from-start`   | —                     | `false`                | Read from the beginning instead of seeking to EOF. |
 | `--max-retries`  | —                     | `5`                    | Retries for a failed batch on retryable errors.    |
 | `--retry-backoff`| —                     | `500ms`                | Initial backoff; doubles per attempt, capped 30s.  |
+| `--metrics-interval` | —                 | `0`                    | When > 0, periodically log internal counters.      |
+| `--spool-dir`    | `PPLOGGER_SPOOL_DIR`  | —                      | Persist exhausted batches here and replay them (durable). |
 
 Send `SIGINT` or `SIGTERM` for graceful shutdown — the in-flight batch is
 flushed before exit.
@@ -97,12 +99,43 @@ Restart=on-failure
 WantedBy=multi-user.target
 ```
 
+## Docker (example)
+
+```dockerfile
+FROM golang:1.21 AS build
+WORKDIR /src
+COPY processor/ .
+RUN CGO_ENABLED=0 go build -o /pplogger-processor
+
+FROM gcr.io/distroless/static
+COPY --from=build /pplogger-processor /pplogger-processor
+ENTRYPOINT ["/pplogger-processor"]
+```
+
+```bash
+docker build -t pplogger-processor -f processor/Dockerfile .
+
+docker run --rm \
+    -e PPLOGGER_FILE=/logs/app.log \
+    -e PPLOGGER_TSDB_URL='http://influx:8086/api/v2/write?org=acme&bucket=logs&precision=ns' \
+    -e PPLOGGER_TSDB_TOKEN='Token my-influx-token' \
+    -e PPLOGGER_SPOOL_DIR=/spool \
+    -v /var/log/pplogger:/logs:ro \
+    -v pplogger-spool:/spool \
+    pplogger-processor
+```
+
 ## Failure behavior
 
 - Bad JSON lines are skipped with a stderr log line; the tail continues.
 - HTTP failures are classified: **retryable** errors (network/timeout, HTTP 429
   and 5xx) are retried with exponential backoff up to `--max-retries`;
   **permanent** errors (other 4xx, e.g. malformed line protocol) are dropped
-  immediately. A batch that exhausts its retries is dropped with a stderr log
-  line — the shipper does not yet buffer to disk, so pair with a remote write
-  that has its own durable queue if strict at-least-once delivery is required.
+  immediately.
+- **Durable buffering** — with `--spool-dir` set, a batch that exhausts its
+  retries is written to disk (one file per batch, written-then-renamed so a
+  reader never sees a partial file) and replayed by a background loop until it
+  succeeds. This survives process restarts, giving at-least-once delivery.
+  Permanent (4xx) batches are discarded rather than spooled, since replay would
+  never succeed. Without `--spool-dir`, an exhausted batch is dropped with a
+  stderr log line.

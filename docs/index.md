@@ -112,9 +112,31 @@ unchanged across services:
 | `log_dir` | `PPLOGGER_DIR` | `/tmp` | Directory for the daily log file. |
 | `debug` | `PPLOGGER_DEBUG` | `False` | Truthy values (`1/true/yes/on`) raise level to `DEBUG`. |
 | `console` | — | `True` | Also stream JSON to stdout. |
+| `level` | — | `None` | Explicit level (`int` or name like `"WARNING"`); overrides `debug`. |
+| `max_bytes` | — | `0` | When > 0, rotate the file at this size (`RotatingFileHandler`). |
+| `backup_count` | — | `0` | Number of rotated backups to keep (with `max_bytes`). |
 
 Per-logger filtering still works after initialization, e.g.
 `logging.getLogger("noisy.lib").setLevel(logging.WARNING)`.
+
+### Context fields for correlation
+
+Bind fields once and they are merged into every subsequent record from the same
+thread / asyncio task — no need to repeat them on each call. Explicit
+`extra={...}` fields override bound context on key collisions.
+
+```python
+from pplogger import bind_context, context
+
+bind_context(request_id="abc-123")     # sticky until cleared/overwritten
+log.info("handling")                    # -> includes request_id
+
+with context(trace_id="t-1"):           # scoped to the block
+    log.info("inner")                   # -> includes request_id + trace_id
+```
+
+API: `bind_context(**fields)`, `context(**fields)` (context manager),
+`clear_context()`, `get_context()`.
 
 ---
 
@@ -162,6 +184,10 @@ and writes each record to a TSDB speaking InfluxDB line protocol over HTTP
   (other **4xx**, e.g. malformed line protocol) are dropped immediately.
 - **Exponential backoff** — retries back off starting at `--retry-backoff`,
   doubling each attempt up to a 30s cap, for at most `--max-retries` attempts.
+- **Durable spool (optional)** — with `--spool-dir`, batches that exhaust their
+  retries are persisted to disk and replayed by a background loop until they
+  succeed, surviving process restarts (at-least-once). Permanent (4xx) batches
+  are discarded instead of spooled.
 - **Context-aware** — backoff and in-flight writes abort promptly on shutdown.
 - **Resilient parsing** — a single malformed JSON line is logged and skipped;
   the tail keeps going.
@@ -185,6 +211,8 @@ and writes each record to a TSDB speaking InfluxDB line protocol over HTTP
 | `--from-start` | — | `false` | Read from the beginning instead of seeking to EOF. |
 | `--max-retries` | — | `5` | Retries for a failed batch on retryable errors. |
 | `--retry-backoff` | — | `500ms` | Initial backoff; doubles per attempt, capped at 30s. |
+| `--metrics-interval` | — | `0` | When > 0, periodically log internal counters. |
+| `--spool-dir` | `PPLOGGER_SPOOL_DIR` | — | Persist exhausted batches to disk and replay them. |
 
 The required inputs accept environment variables, so the binary drops cleanly
 into systemd or Docker. See [processor.md](processor.md) for build and
@@ -228,10 +256,15 @@ processor/pplogger-processor \
 | Idempotent re-initialization | ✅ | — |
 | Exception + traceback capture | ✅ | — |
 | Arbitrary `extra={…}` fields | ✅ | ✅ (promoted to fields) |
+| Context fields (request_id/trace_id) | ✅ | ✅ (promoted to fields) |
 | Env-var configuration | ✅ | ✅ |
-| Debug-level toggle | ✅ | — |
+| Debug-level toggle / explicit level | ✅ | — |
+| Size-based file rotation | ✅ | — |
 | Live tail with rotation handling | — | ✅ |
 | Batched HTTP writes | — | ✅ |
 | Line-protocol mapping & escaping | — | ✅ |
 | Retry with backoff (429/5xx/network) | — | ✅ |
+| Durable disk spool / replay (at-least-once) | — | ✅ |
+| Internal metrics counters | — | ✅ |
+| Configurable hostname | ✅ | — |
 | Graceful shutdown (SIGINT/SIGTERM) | — | ✅ |

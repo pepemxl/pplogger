@@ -58,6 +58,23 @@ across services.
 | `log_dir`  | `PPLOGGER_DIR`      | `/tmp`         | Directory where the daily log file is written.       |
 | `debug`    | `PPLOGGER_DEBUG`    | `False`        | When truthy, sets the root level to `DEBUG`.         |
 | `console`  | —                   | `True`         | Also stream JSON to stdout.                          |
+| `level`    | —                   | `None`         | Explicit level (int or name); overrides `debug`.     |
+| `max_bytes`| —                   | `0`            | When > 0, rotate the file at this size.              |
+| `backup_count` | —               | `0`            | Rotated backups to keep (with `max_bytes`).          |
+
+### Context fields
+
+Bind correlation fields once and they are added to every subsequent record from
+the same thread / asyncio task; explicit `extra={...}` overrides them:
+
+```python
+from pplogger import bind_context, context, clear_context
+
+bind_context(request_id="abc-123")
+with context(trace_id="t-1"):
+    log.info("inner")   # includes request_id and trace_id
+clear_context()
+```
 
 The function is idempotent: calling it again replaces only the handlers it
 previously installed, so it is safe to invoke from each entry point.

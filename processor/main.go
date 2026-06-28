@@ -15,6 +15,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -28,6 +29,9 @@ import (
 	"time"
 )
 
+// maxRetryBackoff caps the exponential backoff between write retries.
+const maxRetryBackoff = 30 * time.Second
+
 type config struct {
 	file          string
 	endpoint      string
@@ -37,6 +41,8 @@ type config struct {
 	flushInterval time.Duration
 	pollInterval  time.Duration
 	fromStart     bool
+	maxRetries    int
+	retryBackoff  time.Duration
 }
 
 func parseFlags() config {
@@ -49,6 +55,8 @@ func parseFlags() config {
 	flag.DurationVar(&c.flushInterval, "flush-interval", 2*time.Second, "max time before a partial batch is flushed")
 	flag.DurationVar(&c.pollInterval, "poll-interval", 250*time.Millisecond, "how often to poll the file for new data")
 	flag.BoolVar(&c.fromStart, "from-start", false, "read the file from the beginning instead of seeking to EOF")
+	flag.IntVar(&c.maxRetries, "max-retries", 5, "max retries for a failed batch on retryable errors (5xx/429/network)")
+	flag.DurationVar(&c.retryBackoff, "retry-backoff", 500*time.Millisecond, "initial backoff between retries (doubles each attempt, capped at 30s)")
 	flag.Parse()
 	return c
 }
@@ -187,9 +195,10 @@ func ship(ctx context.Context, cfg config, in <-chan []byte) error {
 			return
 		}
 		body := strings.Join(batch, "\n")
+		records := len(batch)
 		batch = batch[:0]
-		if err := writeBatch(ctx, client, cfg, body); err != nil {
-			log.Printf("write batch failed (%d bytes): %v", len(body), err)
+		if err := shipBatch(ctx, client, cfg, body); err != nil && ctx.Err() == nil {
+			log.Printf("dropping batch of %d records after retries: %v", records, err)
 		}
 	}
 
@@ -221,6 +230,58 @@ func ship(ctx context.Context, cfg config, in <-chan []byte) error {
 	}
 }
 
+// httpStatusError carries a non-2xx response so callers can decide whether the
+// failure is worth retrying (5xx/429) or permanent (other 4xx).
+type httpStatusError struct {
+	status  int
+	preview string
+}
+
+func (e *httpStatusError) Error() string {
+	return fmt.Sprintf("status %d: %s", e.status, e.preview)
+}
+
+// retryable reports whether a failed write should be retried. Network/transport
+// errors (timeouts, connection refused) and transient server responses
+// (HTTP 429 and 5xx) are retryable; permanent client errors (other 4xx) are not.
+func retryable(err error) bool {
+	if err == nil {
+		return false
+	}
+	var se *httpStatusError
+	if errors.As(err, &se) {
+		return se.status == http.StatusTooManyRequests || se.status >= 500
+	}
+	return true
+}
+
+// shipBatch writes a batch, retrying retryable failures with exponential
+// backoff up to cfg.maxRetries. It stops early if the context is cancelled.
+func shipBatch(ctx context.Context, client *http.Client, cfg config, body string) error {
+	backoff := cfg.retryBackoff
+	for attempt := 0; ; attempt++ {
+		err := writeBatch(ctx, client, cfg, body)
+		if err == nil {
+			return nil
+		}
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		if attempt >= cfg.maxRetries || !retryable(err) {
+			return err
+		}
+		log.Printf("write attempt %d/%d failed: %v; retrying in %s", attempt+1, cfg.maxRetries+1, err, backoff)
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(backoff):
+		}
+		if backoff *= 2; backoff > maxRetryBackoff {
+			backoff = maxRetryBackoff
+		}
+	}
+}
+
 func writeBatch(ctx context.Context, client *http.Client, cfg config, body string) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, cfg.endpoint, strings.NewReader(body))
 	if err != nil {
@@ -237,7 +298,7 @@ func writeBatch(ctx context.Context, client *http.Client, cfg config, body strin
 	defer resp.Body.Close()
 	if resp.StatusCode >= 300 {
 		preview, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
-		return fmt.Errorf("status %d: %s", resp.StatusCode, bytes.TrimSpace(preview))
+		return &httpStatusError{status: resp.StatusCode, preview: string(bytes.TrimSpace(preview))}
 	}
 	io.Copy(io.Discard, resp.Body)
 	return nil

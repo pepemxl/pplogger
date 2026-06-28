@@ -1,0 +1,5 @@
+# Go build artifacts
+# `go build` (no -o) emits a binary named after the directory: processor
+/processor
+# `make processor` builds with an explicit name
+/pplogger-processor

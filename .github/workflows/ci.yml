@@ -1,0 +1,58 @@
+name: CI
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+
+jobs:
+  python:
+    name: Python (lib)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: Install Poetry
+        run: pipx install poetry
+
+      - name: Install dependencies
+        run: poetry install --with dev
+
+      - name: Lint (ruff)
+        run: |
+          poetry run ruff check .
+          poetry run ruff format --check .
+
+      - name: Type check (mypy)
+        run: poetry run mypy pplogger
+
+      - name: Run tests
+        run: poetry run pytest
+
+  go:
+    name: Go (processor)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: processor
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.21"
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Build
+        run: go build ./...
+
+      - name: Test
+        run: go test ./...

@@ -23,6 +23,8 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"syscall"
@@ -40,9 +42,26 @@ type config struct {
 	batchSize     int
 	flushInterval time.Duration
 	pollInterval  time.Duration
-	fromStart     bool
-	maxRetries    int
-	retryBackoff  time.Duration
+	fromStart       bool
+	maxRetries      int
+	retryBackoff    time.Duration
+	metricsInterval time.Duration
+	spoolDir        string
+}
+
+// metrics holds running counters for the shipper, logged periodically when
+// --metrics-interval > 0.
+type metrics struct {
+	shipped   int
+	dropped   int
+	malformed int
+	batches   int
+	spooled   int
+}
+
+func (m metrics) String() string {
+	return fmt.Sprintf("shipped=%d dropped=%d malformed=%d batches=%d spooled=%d",
+		m.shipped, m.dropped, m.malformed, m.batches, m.spooled)
 }
 
 func parseFlags() config {
@@ -57,6 +76,8 @@ func parseFlags() config {
 	flag.BoolVar(&c.fromStart, "from-start", false, "read the file from the beginning instead of seeking to EOF")
 	flag.IntVar(&c.maxRetries, "max-retries", 5, "max retries for a failed batch on retryable errors (5xx/429/network)")
 	flag.DurationVar(&c.retryBackoff, "retry-backoff", 500*time.Millisecond, "initial backoff between retries (doubles each attempt, capped at 30s)")
+	flag.DurationVar(&c.metricsInterval, "metrics-interval", 0, "if > 0, periodically log internal counters (shipped/dropped/malformed/batches)")
+	flag.StringVar(&c.spoolDir, "spool-dir", os.Getenv("PPLOGGER_SPOOL_DIR"), "if set, persist batches that exhaust retries to this directory and replay them later (durable at-least-once)")
 	flag.Parse()
 	return c
 }
@@ -79,6 +100,10 @@ func main() {
 			log.Printf("tail stopped: %v", err)
 		}
 	}()
+
+	if cfg.spoolDir != "" {
+		go replaySpool(ctx, cfg)
+	}
 
 	if err := ship(ctx, cfg, lines); err != nil {
 		log.Fatalf("shipper exited: %v", err)
@@ -190,6 +215,7 @@ func tail(ctx context.Context, cfg config, out chan<- []byte) error {
 func ship(ctx context.Context, cfg config, in <-chan []byte) error {
 	client := &http.Client{Timeout: 10 * time.Second}
 	batch := make([]string, 0, cfg.batchSize)
+	var m metrics
 	flush := func() {
 		if len(batch) == 0 {
 			return
@@ -197,28 +223,64 @@ func ship(ctx context.Context, cfg config, in <-chan []byte) error {
 		body := strings.Join(batch, "\n")
 		records := len(batch)
 		batch = batch[:0]
-		if err := shipBatch(ctx, client, cfg, body); err != nil && ctx.Err() == nil {
+		if err := shipBatch(ctx, client, cfg, body); err != nil {
+			if ctx.Err() != nil {
+				return
+			}
+			// Retryable-but-exhausted failures can be spooled for later replay;
+			// permanent errors (4xx) never will, so they are dropped outright.
+			if cfg.spoolDir != "" && retryable(err) {
+				if serr := spoolBatch(cfg.spoolDir, body); serr != nil {
+					m.dropped += records
+					log.Printf("dropping batch of %d records (spool failed: %v); original: %v", records, serr, err)
+				} else {
+					m.spooled += records
+					log.Printf("spooled batch of %d records after retries: %v", records, err)
+				}
+				return
+			}
+			m.dropped += records
 			log.Printf("dropping batch of %d records after retries: %v", records, err)
+			return
 		}
+		m.shipped += records
+		m.batches++
 	}
 
 	ticker := time.NewTicker(cfg.flushInterval)
 	defer ticker.Stop()
 
+	var metricsC <-chan time.Time
+	if cfg.metricsInterval > 0 {
+		mt := time.NewTicker(cfg.metricsInterval)
+		defer mt.Stop()
+		metricsC = mt.C
+	}
+	logMetrics := func(prefix string) {
+		if cfg.metricsInterval > 0 {
+			log.Printf("%s: %s", prefix, m)
+		}
+	}
+
 	for {
 		select {
 		case <-ctx.Done():
 			flush()
+			logMetrics("final metrics")
 			return nil
 		case <-ticker.C:
 			flush()
+		case <-metricsC:
+			log.Printf("metrics: %s", m)
 		case raw, ok := <-in:
 			if !ok {
 				flush()
+				logMetrics("final metrics")
 				return nil
 			}
 			line, err := toLineProtocol(raw, cfg.measurement)
 			if err != nil {
+				m.malformed++
 				log.Printf("skip malformed record: %v", err)
 				continue
 			}
@@ -278,6 +340,98 @@ func shipBatch(ctx context.Context, client *http.Client, cfg config, body string
 		}
 		if backoff *= 2; backoff > maxRetryBackoff {
 			backoff = maxRetryBackoff
+		}
+	}
+}
+
+// spoolExt marks batch files written to the spool directory.
+const spoolExt = ".batch"
+
+// spoolBatch durably persists a batch body to the spool directory. It writes to
+// a temp file and renames it into place so a replayer never sees a partial file.
+func spoolBatch(dir, body string) error {
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	tmp, err := os.CreateTemp(dir, "tmp-*"+spoolExt)
+	if err != nil {
+		return err
+	}
+	name := tmp.Name()
+	if _, err := tmp.WriteString(body); err != nil {
+		tmp.Close()
+		os.Remove(name)
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		os.Remove(name)
+		return err
+	}
+	// Final name encodes time for FIFO-ish ordering; keep the .batch suffix.
+	final := filepath.Join(dir, fmt.Sprintf("%d-%s", time.Now().UnixNano(), filepath.Base(name)))
+	return os.Rename(name, final)
+}
+
+// replaySpoolOnce attempts to re-ship every spooled batch once, oldest first.
+// A successfully shipped file is removed; on the first retryable failure it
+// stops (leaving the rest for a later pass). Returns the number replayed.
+func replaySpoolOnce(ctx context.Context, client *http.Client, cfg config) (int, error) {
+	entries, err := os.ReadDir(cfg.spoolDir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return 0, nil
+		}
+		return 0, err
+	}
+	names := make([]string, 0, len(entries))
+	for _, e := range entries {
+		if !e.IsDir() && strings.HasSuffix(e.Name(), spoolExt) && !strings.HasPrefix(e.Name(), "tmp-") {
+			names = append(names, e.Name())
+		}
+	}
+	sort.Strings(names)
+
+	replayed := 0
+	for _, name := range names {
+		if ctx.Err() != nil {
+			return replayed, ctx.Err()
+		}
+		path := filepath.Join(cfg.spoolDir, name)
+		body, err := os.ReadFile(path)
+		if err != nil {
+			log.Printf("spool: cannot read %s: %v", name, err)
+			continue
+		}
+		if err := shipBatch(ctx, client, cfg, string(body)); err != nil {
+			if retryable(err) {
+				return replayed, err // still failing; try again next pass
+			}
+			// Permanent error: this batch will never succeed, so discard it.
+			log.Printf("spool: discarding %s (permanent error): %v", name, err)
+		}
+		if err := os.Remove(path); err != nil {
+			log.Printf("spool: cannot remove %s: %v", name, err)
+		}
+		replayed++
+	}
+	return replayed, nil
+}
+
+// replaySpool periodically drains the spool directory until the context ends.
+func replaySpool(ctx context.Context, cfg config) {
+	client := &http.Client{Timeout: 10 * time.Second}
+	ticker := time.NewTicker(cfg.flushInterval)
+	defer ticker.Stop()
+	for {
+		if n, err := replaySpoolOnce(ctx, client, cfg); err != nil && ctx.Err() == nil {
+			log.Printf("spool replay paused: %v", err)
+		} else if n > 0 {
+			log.Printf("spool: replayed %d batch file(s)", n)
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
 		}
 	}
 }

@@ -14,6 +14,8 @@ import socket
 import traceback
 from typing import Any
 
+from pplogger.context import get_context
+
 # logging.LogRecord built-in attributes — anything not in this set is treated
 # as user-supplied `extra={...}` and copied into the JSON payload.
 _RESERVED_RECORD_ATTRS = frozenset(
@@ -80,8 +82,15 @@ class JSONFormatter(logging.Formatter):
                 "traceback": "".join(traceback.format_exception(exc_type, exc_value, exc_tb)),
             }
 
-        for key, value in record.__dict__.items():
-            if key in _RESERVED_RECORD_ATTRS or key.startswith("_") or key in payload:
+        # Collect user `extra={...}` fields, then merge them over the bound
+        # context so explicit per-call fields win on key collisions.
+        extras = {
+            key: _safe(value)
+            for key, value in record.__dict__.items()
+            if key not in _RESERVED_RECORD_ATTRS and not key.startswith("_") and key not in payload
+        }
+        for key, value in {**get_context(), **extras}.items():
+            if key in payload:
                 continue
             payload[key] = _safe(value)
 

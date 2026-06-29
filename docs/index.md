@@ -170,7 +170,9 @@ and writes each record to a TSDB speaking InfluxDB line protocol over HTTP
 ### JSON → line protocol mapping
 
 - **Tags** (low cardinality, indexed): `service`, `module`, `level`,
-  `hostname`. Empty values are skipped to keep series count bounded.
+  `hostname`. Empty values are skipped to keep series count bounded; with
+  `--max-tag-cardinality` a tag that exceeds N distinct values is demoted to a
+  field to protect the TSDB.
 - **Fields**: `message`, `logger`, `function`, `line`, `pid`,
   `exception_type`, `exception_message`, plus any scalar `extra` field promoted
   from the record. Numbers are emitted as integers (`i` suffix) or floats;
@@ -217,6 +219,7 @@ and writes each record to a TSDB speaking InfluxDB line protocol over HTTP
 | `--retry-backoff` | — | `500ms` | Initial backoff; doubles per attempt, capped at 30s. |
 | `--metrics-interval` | — | `0` | When > 0, periodically log internal counters. |
 | `--spool-dir` | `PPLOGGER_SPOOL_DIR` | — | Persist exhausted batches to disk and replay them. |
+| `--max-tag-cardinality` | — | `0` | Demote a tag to a field past N distinct values. |
 
 The required inputs accept environment variables, so the binary drops cleanly
 into systemd or Docker. See [processor.md](processor.md) for build and

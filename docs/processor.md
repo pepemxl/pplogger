@@ -37,6 +37,7 @@ cleanly into systemd / Docker:
 | `--retry-backoff`| —                     | `500ms`                | Initial backoff; doubles per attempt, capped 30s.  |
 | `--metrics-interval` | —                 | `0`                    | When > 0, periodically log internal counters.      |
 | `--spool-dir`    | `PPLOGGER_SPOOL_DIR`  | —                      | Persist exhausted batches here and replay them (durable). |
+| `--max-tag-cardinality` | —              | `0`                    | Demote a tag to a field once it exceeds N distinct values. |
 
 Send `SIGINT` or `SIGTERM` for graceful shutdown — the in-flight batch is
 flushed before exit.
@@ -47,6 +48,12 @@ Each JSON record becomes one line. Tags are kept low-cardinality so the
 resulting series count stays bounded.
 
 **Tags** (indexed): `service`, `module`, `level`, `hostname`.
+
+> **Cardinality guard.** Tags drive the series count in a TSDB, so they must
+> stay low-cardinality. With `--max-tag-cardinality N`, once a tag key is seen
+> with more than `N` distinct values the shipper "trips" it: that tag is demoted
+> to a **field** (value preserved, no new series) for the rest of the run, and a
+> one-time warning is logged. Disabled by default (`0`).
 
 **Fields**: `message`, `logger`, `function`, `line`, `pid`,
 `exception_type`, `exception_message`, plus any scalar `extra={…}` field

@@ -7,8 +7,9 @@ from pplogger.logger import build_log_path, initializer_logger
 
 try:
     # Single source of truth: the version declared in pyproject.toml, read from
-    # the installed package metadata.
-    __version__ = version("pplogger")
+    # the installed distribution metadata. The distribution is named
+    # "pepe-logger" on PyPI even though the import package is "pplogger".
+    __version__ = version("pepe-logger")
 except PackageNotFoundError:  # running from a source tree that isn't installed
     __version__ = "0.0.0+unknown"
 

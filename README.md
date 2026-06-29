@@ -6,6 +6,15 @@ The goal is to standarize logs in distribuited systems and permit scale logging 
 
 This package converts log records into JSON messages.
 
+## Install
+
+```bash
+pip install pepe-logger
+```
+
+The PyPI distribution is named **`pepe-logger`**; the importable package is
+**`pplogger`** (`from pplogger import initializer_logger`).
+
 An example of a log file:
 - `/tmp/service_api.module_pepe_logs.2024_07_13.log`
 

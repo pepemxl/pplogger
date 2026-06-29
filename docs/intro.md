@@ -18,13 +18,16 @@ time-series database.
 ## Install
 
 ```bash
-poetry install
+pip install pepe-logger
 ```
 
-Or from source in any environment:
+The distribution is published to PyPI as **`pepe-logger`**, but the importable
+package is **`pplogger`** (i.e. `from pplogger import initializer_logger`).
+
+From source in any environment:
 
 ```bash
-pip install -e .
+poetry install      # or:  pip install -e .
 ```
 
 ## Quick start

@@ -1,5 +1,6 @@
 [tool.poetry]
-name = "pplogger"
+# Distribution name on PyPI (the importable package is still `pplogger`).
+name = "pepe-logger"
 description = "Structured JSON logging for distributed systems, with a Go log shipper."
 authors = ["Jose Luis Alonzo Velazquez <pepemxl@gmail.com>"]
 readme = "README.md"

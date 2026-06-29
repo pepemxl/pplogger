@@ -16,7 +16,7 @@ classifiers = [
     "Topic :: System :: Logging",
     "Typing :: Typed",
 ]
-version = "0.0.2"
+version = "0.0.3"
 packages = [ {include="pplogger"}]
 [tool.poetry.dependencies]
 python = ">=3.10,<4.0"

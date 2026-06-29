@@ -198,6 +198,13 @@ and writes each record to a TSDB speaking InfluxDB line protocol over HTTP
 - **Resilient parsing** — a single malformed JSON line is logged and skipped;
   the tail keeps going.
 
+### Observability
+
+- Running counters (`shipped`, `dropped`, `malformed`, `batches`, `spooled`)
+  are exposed two ways: a periodic summary log (`--metrics-interval`) and a
+  Prometheus `/metrics` endpoint (`--metrics-addr`). Counters are atomic, so
+  scraping never races the ship loop.
+
 ### Graceful shutdown
 
 - `SIGINT` / `SIGTERM` cancel the context; the in-flight batch is flushed before
@@ -218,6 +225,7 @@ and writes each record to a TSDB speaking InfluxDB line protocol over HTTP
 | `--max-retries` | — | `5` | Retries for a failed batch on retryable errors. |
 | `--retry-backoff` | — | `500ms` | Initial backoff; doubles per attempt, capped at 30s. |
 | `--metrics-interval` | — | `0` | When > 0, periodically log internal counters. |
+| `--metrics-addr` | `PPLOGGER_METRICS_ADDR` | — | Serve Prometheus counters at `/metrics`. |
 | `--spool-dir` | `PPLOGGER_SPOOL_DIR` | — | Persist exhausted batches to disk and replay them. |
 | `--max-tag-cardinality` | — | `0` | Demote a tag to a field past N distinct values. |
 
@@ -272,6 +280,6 @@ processor/pplogger-processor \
 | Line-protocol mapping & escaping | — | ✅ |
 | Retry with backoff (429/5xx/network) | — | ✅ |
 | Durable disk spool / replay (at-least-once) | — | ✅ |
-| Internal metrics counters | — | ✅ |
+| Internal metrics counters (log + Prometheus) | — | ✅ |
 | Configurable hostname | ✅ | — |
 | Graceful shutdown (SIGINT/SIGTERM) | — | ✅ |

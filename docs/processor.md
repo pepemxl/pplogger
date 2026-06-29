@@ -36,6 +36,7 @@ cleanly into systemd / Docker:
 | `--max-retries`  | —                     | `5`                    | Retries for a failed batch on retryable errors.    |
 | `--retry-backoff`| —                     | `500ms`                | Initial backoff; doubles per attempt, capped 30s.  |
 | `--metrics-interval` | —                 | `0`                    | When > 0, periodically log internal counters.      |
+| `--metrics-addr` | `PPLOGGER_METRICS_ADDR` | —                  | If set (e.g. `:9090`), serve Prometheus counters at `/metrics`. |
 | `--spool-dir`    | `PPLOGGER_SPOOL_DIR`  | —                      | Persist exhausted batches here and replay them (durable). |
 | `--max-tag-cardinality` | —              | `0`                    | Demote a tag to a field once it exceeds N distinct values. |
 
@@ -131,6 +132,29 @@ docker run --rm \
     -v pplogger-spool:/spool \
     pplogger-processor
 ```
+
+## Metrics
+
+The shipper keeps running counters: `shipped`, `dropped`, `malformed`,
+`batches`, and `spooled`. There are two ways to read them:
+
+- **Periodic log** — `--metrics-interval 30s` logs a summary line every 30s (and
+  a final line on shutdown).
+- **Prometheus endpoint** — `--metrics-addr :9090` (or `PPLOGGER_METRICS_ADDR`)
+  serves them at `http://<host>:9090/metrics` in Prometheus text format:
+
+  ```
+  # HELP pplogger_shipped_total Records successfully shipped to the TSDB.
+  # TYPE pplogger_shipped_total counter
+  pplogger_shipped_total 1024
+  pplogger_dropped_total 0
+  pplogger_malformed_total 3
+  pplogger_batches_total 6
+  pplogger_spooled_total 0
+  ```
+
+  The server shuts down gracefully on `SIGINT`/`SIGTERM`. Counters are read
+  atomically, so scraping never races the ship loop.
 
 ## Failure behavior
 

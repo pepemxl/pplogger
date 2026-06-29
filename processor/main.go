@@ -45,8 +45,9 @@ type config struct {
 	fromStart       bool
 	maxRetries      int
 	retryBackoff    time.Duration
-	metricsInterval time.Duration
-	spoolDir        string
+	metricsInterval   time.Duration
+	spoolDir          string
+	maxTagCardinality int
 }
 
 // metrics holds running counters for the shipper, logged periodically when
@@ -78,6 +79,7 @@ func parseFlags() config {
 	flag.DurationVar(&c.retryBackoff, "retry-backoff", 500*time.Millisecond, "initial backoff between retries (doubles each attempt, capped at 30s)")
 	flag.DurationVar(&c.metricsInterval, "metrics-interval", 0, "if > 0, periodically log internal counters (shipped/dropped/malformed/batches)")
 	flag.StringVar(&c.spoolDir, "spool-dir", os.Getenv("PPLOGGER_SPOOL_DIR"), "if set, persist batches that exhaust retries to this directory and replay them later (durable at-least-once)")
+	flag.IntVar(&c.maxTagCardinality, "max-tag-cardinality", 0, "if > 0, demote a tag to a field once it exceeds this many distinct values (protects the TSDB)")
 	flag.Parse()
 	return c
 }
@@ -215,6 +217,7 @@ func tail(ctx context.Context, cfg config, out chan<- []byte) error {
 func ship(ctx context.Context, cfg config, in <-chan []byte) error {
 	client := &http.Client{Timeout: 10 * time.Second}
 	batch := make([]string, 0, cfg.batchSize)
+	guard := newCardinalityGuard(cfg.maxTagCardinality)
 	var m metrics
 	flush := func() {
 		if len(batch) == 0 {
@@ -278,7 +281,7 @@ func ship(ctx context.Context, cfg config, in <-chan []byte) error {
 				logMetrics("final metrics")
 				return nil
 			}
-			line, err := toLineProtocol(raw, cfg.measurement)
+			line, err := toLineProtocol(raw, cfg.measurement, guard)
 			if err != nil {
 				m.malformed++
 				log.Printf("skip malformed record: %v", err)
@@ -462,7 +465,53 @@ func writeBatch(ctx context.Context, client *http.Client, cfg config, body strin
 // Tags (low-cardinality): service, module, level, hostname.
 // Fields: message, logger, function, line, pid, exception_type, plus any
 // scalar `extra` fields the producer attached.
-func toLineProtocol(raw []byte, measurement string) (string, error) {
+// cardinalityGuard caps the number of distinct values a tag may take. Once a
+// tag exceeds the limit it is "tripped": further occurrences are demoted to
+// fields by toLineProtocol (the value is preserved but no longer creates new
+// time-series). A nil guard disables the check.
+type cardinalityGuard struct {
+	max     int
+	seen    map[string]map[string]struct{}
+	tripped map[string]bool
+}
+
+func newCardinalityGuard(max int) *cardinalityGuard {
+	if max <= 0 {
+		return nil
+	}
+	return &cardinalityGuard{
+		max:     max,
+		seen:    map[string]map[string]struct{}{},
+		tripped: map[string]bool{},
+	}
+}
+
+// allow reports whether key=value may be emitted as a tag.
+func (g *cardinalityGuard) allow(key, value string) bool {
+	if g == nil {
+		return true
+	}
+	if g.tripped[key] {
+		return false
+	}
+	vals := g.seen[key]
+	if vals == nil {
+		vals = map[string]struct{}{}
+		g.seen[key] = vals
+	}
+	if _, ok := vals[value]; ok {
+		return true // already counted, no new series
+	}
+	if len(vals) >= g.max {
+		g.tripped[key] = true
+		log.Printf("cardinality: tag %q exceeded %d distinct values; demoting it to a field to protect the TSDB", key, g.max)
+		return false
+	}
+	vals[value] = struct{}{}
+	return true
+}
+
+func toLineProtocol(raw []byte, measurement string, guard *cardinalityGuard) (string, error) {
 	var rec map[string]any
 	dec := json.NewDecoder(bytes.NewReader(raw))
 	dec.UseNumber()
@@ -480,6 +529,10 @@ func toLineProtocol(raw []byte, measurement string) (string, error) {
 	for _, key := range []string{"service", "module", "level", "hostname"} {
 		v, ok := rec[key].(string)
 		if !ok || v == "" {
+			continue
+		}
+		if !guard.allow(key, v) {
+			// Leave the value in rec so it is promoted to a field below.
 			continue
 		}
 		b.WriteByte(',')

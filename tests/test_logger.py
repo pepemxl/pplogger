@@ -5,6 +5,7 @@ from __future__ import annotations
 import datetime as dt
 import json
 import logging
+import os
 from pathlib import Path
 
 import pytest
@@ -91,6 +92,30 @@ def test_extra_fields_preserved(tmp_path):
 
     record = _read_records(log_path)[0]
     assert record["request_id"] == "abc-123"
+
+
+@pytest.mark.skipif(not hasattr(os, "fork"), reason="requires os.fork")
+def test_pid_refreshed_after_fork(tmp_path):
+    log_path = initializer_logger(service="svc", module="mod", log_dir=tmp_path, console=False)
+    log = logging.getLogger("test.fork")
+    parent_pid = os.getpid()
+
+    child_pid = os.fork()
+    if child_pid == 0:  # child
+        try:
+            log.info("from child")
+            for handler in logging.getLogger().handlers:
+                handler.flush()
+        finally:
+            os._exit(0)
+
+    os.waitpid(child_pid, 0)
+    log.info("from parent")
+
+    records = {r["message"]: r["pid"] for r in _read_records(log_path)}
+    assert records["from parent"] == parent_pid
+    assert records["from child"] == child_pid  # refreshed, not the parent's pid
+    assert records["from child"] != records["from parent"]
 
 
 def test_initializer_logger_is_idempotent(tmp_path):

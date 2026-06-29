@@ -4,8 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -235,11 +237,168 @@ func TestCardinalityGuardNilAllowsAll(t *testing.T) {
 	}
 }
 
+func newTestMetrics(shipped, dropped, malformed, batches, spooled int64) *metrics {
+	m := &metrics{}
+	m.shipped.Add(shipped)
+	m.dropped.Add(dropped)
+	m.malformed.Add(malformed)
+	m.batches.Add(batches)
+	m.spooled.Add(spooled)
+	return m
+}
+
+func nextLine(t *testing.T, ch <-chan []byte) string {
+	t.Helper()
+	select {
+	case b := <-ch:
+		return string(b)
+	case <-time.After(3 * time.Second):
+		t.Fatal("timeout waiting for a tailed line")
+		return ""
+	}
+}
+
+func appendLine(t *testing.T, path, s string) {
+	t.Helper()
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		t.Fatalf("open for append: %v", err)
+	}
+	defer f.Close()
+	if _, err := f.WriteString(s); err != nil {
+		t.Fatalf("append: %v", err)
+	}
+}
+
+func TestTailFollowsAppendsAndRotation(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "app.log")
+	if err := os.WriteFile(path, []byte("line1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	out := make(chan []byte, 16)
+	cfg := config{file: path, fromStart: true, pollInterval: 10 * time.Millisecond}
+	errc := make(chan error, 1)
+	go func() { errc <- tail(ctx, cfg, out) }()
+
+	if got := nextLine(t, out); got != "line1" {
+		t.Errorf("first line = %q, want line1", got)
+	}
+
+	// Plain append on the same inode.
+	appendLine(t, path, "line2\n")
+	if got := nextLine(t, out); got != "line2" {
+		t.Errorf("append = %q, want line2", got)
+	}
+
+	// Partial write must be buffered until the newline arrives.
+	appendLine(t, path, "par")
+	appendLine(t, path, "tial\n")
+	if got := nextLine(t, out); got != "partial" {
+		t.Errorf("partial = %q, want partial", got)
+	}
+
+	// Rotation by inode change (logrotate create-then-rename style).
+	newpath := filepath.Join(dir, "app.log.new")
+	if err := os.WriteFile(newpath, []byte("rotated\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(newpath, path); err != nil {
+		t.Fatal(err)
+	}
+	if got := nextLine(t, out); got != "rotated" {
+		t.Errorf("after rotation = %q, want rotated", got)
+	}
+
+	cancel()
+	if err := <-errc; err != nil && err != context.Canceled {
+		t.Errorf("tail returned %v", err)
+	}
+}
+
+func TestTailHandlesTruncation(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "app.log")
+	if err := os.WriteFile(path, []byte("first\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	out := make(chan []byte, 16)
+	cfg := config{file: path, fromStart: true, pollInterval: 10 * time.Millisecond}
+	errc := make(chan error, 1)
+	go func() { errc <- tail(ctx, cfg, out) }()
+
+	if got := nextLine(t, out); got != "first" {
+		t.Errorf("first line = %q, want first", got)
+	}
+
+	// Let the poller record the current size (6) before we shrink it, so the
+	// truncation is actually observed as size < lastSize.
+	time.Sleep(60 * time.Millisecond)
+
+	// Truncate (size shrinks below last seen), let the poller observe the
+	// shrink and reopen at offset 0, then write fresh content. This models
+	// logrotate's copytruncate: truncate now, app writes gradually after.
+	if err := os.Truncate(path, 0); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(60 * time.Millisecond) // > pollInterval, so the reopen happens first
+	appendLine(t, path, "after-trunc\n")
+	if got := nextLine(t, out); got != "after-trunc" {
+		t.Errorf("after truncation = %q, want after-trunc", got)
+	}
+
+	cancel()
+	if err := <-errc; err != nil && err != context.Canceled {
+		t.Errorf("tail returned %v", err)
+	}
+}
+
 func TestMetricsString(t *testing.T) {
-	m := metrics{shipped: 5, dropped: 1, malformed: 2, batches: 3, spooled: 4}
+	m := newTestMetrics(5, 1, 2, 3, 4)
 	want := "shipped=5 dropped=1 malformed=2 batches=3 spooled=4"
 	if got := m.String(); got != want {
 		t.Errorf("metrics.String() = %q, want %q", got, want)
+	}
+}
+
+func TestMetricsPrometheus(t *testing.T) {
+	out := newTestMetrics(5, 1, 2, 3, 4).prometheus()
+	for _, want := range []string{
+		"# TYPE pplogger_shipped_total counter",
+		"pplogger_shipped_total 5",
+		"pplogger_dropped_total 1",
+		"pplogger_malformed_total 2",
+		"pplogger_batches_total 3",
+		"pplogger_spooled_total 4",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("prometheus() missing %q in:\n%s", want, out)
+		}
+	}
+}
+
+func TestServeMetricsEndpoint(t *testing.T) {
+	m := newTestMetrics(7, 0, 0, 2, 0)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
+		_, _ = io.WriteString(w, m.prometheus())
+	}))
+	defer srv.Close()
+
+	resp, err := srv.Client().Get(srv.URL + "/metrics")
+	if err != nil {
+		t.Fatalf("GET /metrics: %v", err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if !strings.Contains(string(body), "pplogger_shipped_total 7") {
+		t.Errorf("unexpected /metrics body:\n%s", body)
 	}
 }
 

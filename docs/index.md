@@ -83,7 +83,7 @@ Each log record becomes one JSON object on its own line. Standard fields:
 | `message` | Rendered message (`record.getMessage()`). |
 | `service` / `module` | Identifiers passed to `initializer_logger`. |
 | `hostname` | `socket.gethostname()` of the emitter. |
-| `pid` | Process id. |
+| `pid` | Process id (cached, but refreshed after `os.fork()` so children report their own). |
 | `source_module` | Python module that issued the log. |
 | `function` | Function name that issued the log. |
 | `line` | Source line number. |

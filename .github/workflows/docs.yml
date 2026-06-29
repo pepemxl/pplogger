@@ -27,11 +27,9 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Configure Pages
-        # enablement: true creates/enables the Pages site and sets its source to
-        # GitHub Actions, avoiding the "Not Found" error on first deploy.
+        # Pages must be enabled once in repo settings (Source: GitHub Actions);
+        # the default GITHUB_TOKEN cannot create the site, so no enablement here.
         uses: actions/configure-pages@v5
-        with:
-          enablement: true
 
       - name: Set up Python
         uses: actions/setup-python@v5

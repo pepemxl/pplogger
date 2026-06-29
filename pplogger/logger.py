@@ -6,6 +6,7 @@ import datetime as dt
 import logging
 import os
 import sys
+from collections.abc import Callable
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
@@ -27,6 +28,54 @@ def build_log_path(
     return Path(log_dir) / f"{service}.{module}_logs.{day}.log"
 
 
+class DailyDatedFileHandler(logging.FileHandler):
+    """A ``FileHandler`` that rolls over to a new date-stamped file at midnight.
+
+    Unlike ``TimedRotatingFileHandler`` (which renames the active file and keeps
+    a fixed base name), this preserves pplogger's convention of putting the day
+    in the filename: each calendar day gets its own
+    ``<service>.<module>_logs.<YYYY_MM_DD>.log``. When the local date changes,
+    the current stream is closed and a new dated file is opened.
+
+    ``clock`` is injectable for testing; it defaults to ``datetime.date.today``.
+    """
+
+    def __init__(
+        self,
+        service: str,
+        module: str,
+        log_dir: str | os.PathLike[str],
+        encoding: str | None = None,
+        clock: Callable[[], dt.date] | None = None,
+    ) -> None:
+        self._service = service
+        self._module = module
+        self._log_dir = log_dir
+        self._clock = clock or dt.date.today
+        self._current_day = self._clock()
+        path = build_log_path(service, module, log_dir, self._current_day)
+        super().__init__(path, encoding=encoding)
+
+    def emit(self, record: logging.LogRecord) -> None:
+        today = self._clock()
+        if today != self._current_day:
+            self._roll_to(today)
+        super().emit(record)
+
+    def _roll_to(self, day: dt.date) -> None:
+        self.acquire()
+        try:
+            if self.stream:
+                self.stream.close()
+                self.stream = None
+            self._current_day = day
+            new_path = build_log_path(self._service, self._module, self._log_dir, day)
+            self.baseFilename = os.path.abspath(str(new_path))
+            self.stream = self._open()
+        finally:
+            self.release()
+
+
 def initializer_logger(
     service: str = DEFAULT_SERVICE,
     module: str = DEFAULT_MODULE,
@@ -37,6 +86,7 @@ def initializer_logger(
     max_bytes: int = 0,
     backup_count: int = 0,
     hostname: str | None = None,
+    rotate_daily: bool = False,
 ) -> Path:
     """Configure the root logger to emit JSON records to a daily file.
 
@@ -52,6 +102,9 @@ def initializer_logger(
     :param hostname: override the ``hostname`` field (defaults to
         ``socket.gethostname()``); useful in containers where the host id is
         injected via the environment.
+    :param rotate_daily: when True (and ``max_bytes`` is 0), roll over to a new
+        date-stamped file at midnight via :class:`DailyDatedFileHandler`.
+        Ignored when ``max_bytes`` > 0 (size-based rotation takes precedence).
     """
     log_path = build_log_path(service=service, module=module, log_dir=log_dir)
     log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -77,6 +130,8 @@ def initializer_logger(
         file_handler = RotatingFileHandler(
             log_path, maxBytes=max_bytes, backupCount=backup_count, encoding="utf-8"
         )
+    elif rotate_daily:
+        file_handler = DailyDatedFileHandler(service, module, log_dir, encoding="utf-8")
     else:
         file_handler = logging.FileHandler(log_path, encoding="utf-8")
     file_handler.setLevel(resolved_level)

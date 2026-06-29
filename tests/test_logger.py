@@ -168,6 +168,43 @@ def test_hostname_override(tmp_path):
     assert _read_records(log_path)[0]["hostname"] == "edge-1"
 
 
+def test_daily_dated_handler_rolls_over(tmp_path):
+    from pplogger.logger import DailyDatedFileHandler
+
+    days = [dt.date(2026, 6, 28), dt.date(2026, 6, 29)]
+    state = {"i": 0}
+    handler = DailyDatedFileHandler(
+        "svc", "mod", tmp_path, encoding="utf-8", clock=lambda: days[state["i"]]
+    )
+    handler.setFormatter(logging.Formatter("%(message)s"))
+    log = logging.getLogger("test.daily")
+    log.setLevel(logging.INFO)
+    log.addHandler(handler)
+    try:
+        log.info("day1")
+        state["i"] = 1  # simulate crossing midnight
+        log.info("day2")
+    finally:
+        log.removeHandler(handler)
+        handler.close()
+
+    p1 = build_log_path("svc", "mod", tmp_path, days[0])
+    p2 = build_log_path("svc", "mod", tmp_path, days[1])
+    assert "day1" in p1.read_text() and "day2" not in p1.read_text()
+    assert "day2" in p2.read_text()
+
+
+def test_initializer_rotate_daily_selects_handler(tmp_path):
+    from pplogger.logger import DailyDatedFileHandler
+
+    initializer_logger(
+        service="svc", module="mod", log_dir=tmp_path, console=False, rotate_daily=True
+    )
+    root = logging.getLogger()
+    pplogger_handlers = [h for h in root.handlers if getattr(h, "_pplogger", False)]
+    assert any(isinstance(h, DailyDatedFileHandler) for h in pplogger_handlers)
+
+
 def test_size_based_rotation(tmp_path):
     log_path = initializer_logger(
         service="svc",

@@ -39,7 +39,7 @@ func TestToLineProtocolBasic(t *testing.T) {
 		`"message":"hello","service":"svc","module":"mod","hostname":"h1",` +
 		`"pid":42,"function":"main","line":12,"request_id":"abc-123"}`)
 
-	line, err := toLineProtocol(raw, "logs")
+	line, err := toLineProtocol(raw, "logs", nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -74,7 +74,7 @@ func TestToLineProtocolException(t *testing.T) {
 	raw := []byte(`{"timestamp":"2026-05-01T10:00:00.000Z","level":"ERROR","message":"boom",` +
 		`"service":"svc","exception":{"type":"ValueError","message":"bad"}}`)
 
-	line, err := toLineProtocol(raw, "logs")
+	line, err := toLineProtocol(raw, "logs", nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -89,7 +89,7 @@ func TestToLineProtocolException(t *testing.T) {
 
 func TestToLineProtocolMissingTimestampUsesNow(t *testing.T) {
 	raw := []byte(`{"level":"INFO","message":"hi","service":"svc"}`)
-	line, err := toLineProtocol(raw, "logs")
+	line, err := toLineProtocol(raw, "logs", nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -101,20 +101,20 @@ func TestToLineProtocolMissingTimestampUsesNow(t *testing.T) {
 
 func TestToLineProtocolUnparsableTimestamp(t *testing.T) {
 	raw := []byte(`{"timestamp":"not-a-date","message":"hi"}`)
-	if _, err := toLineProtocol(raw, "logs"); err == nil {
+	if _, err := toLineProtocol(raw, "logs", nil); err == nil {
 		t.Fatal("expected error for unparsable timestamp, got nil")
 	}
 }
 
 func TestToLineProtocolNoFields(t *testing.T) {
 	raw := []byte(`{"timestamp":"2026-05-01T10:00:00.000Z","service":"svc"}`)
-	if _, err := toLineProtocol(raw, "logs"); err == nil {
+	if _, err := toLineProtocol(raw, "logs", nil); err == nil {
 		t.Fatal("expected 'no fields' error, got nil")
 	}
 }
 
 func TestToLineProtocolInvalidJSON(t *testing.T) {
-	if _, err := toLineProtocol([]byte(`{not json`), "logs"); err == nil {
+	if _, err := toLineProtocol([]byte(`{not json`), "logs", nil); err == nil {
 		t.Fatal("expected error for invalid JSON, got nil")
 	}
 }
@@ -187,6 +187,51 @@ func TestEscapeMeasurement(t *testing.T) {
 	// commas and spaces are escaped, '=' is not.
 	if got, want := escapeMeasurement(`a,b c=d`), `a\,b\ c=d`; got != want {
 		t.Errorf("escapeMeasurement = %q, want %q", got, want)
+	}
+}
+
+func TestCardinalityGuardDemotesTagToField(t *testing.T) {
+	guard := newCardinalityGuard(1)
+	rec := func(host string) []byte {
+		return []byte(`{"timestamp":"2026-05-01T10:00:00.000Z","level":"INFO","message":"m",` +
+			`"service":"svc","hostname":"` + host + `"}`)
+	}
+
+	// First distinct hostname value is allowed as a tag.
+	l1, err := toLineProtocol(rec("h1"), "logs", guard)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	prefix1, fields1, _ := parseLine(t, l1)
+	if !strings.Contains(prefix1, "hostname=h1") {
+		t.Errorf("expected hostname tag in prefix %q", prefix1)
+	}
+	if _, ok := fields1["hostname"]; ok {
+		t.Errorf("did not expect hostname as a field yet: %v", fields1)
+	}
+
+	// Second distinct value trips the limit and is demoted to a field.
+	l2, err := toLineProtocol(rec("h2"), "logs", guard)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	prefix2, fields2, _ := parseLine(t, l2)
+	if strings.Contains(prefix2, "hostname=") {
+		t.Errorf("expected hostname demoted out of tags, prefix %q", prefix2)
+	}
+	if got := fields2["hostname"]; got != `"h2"` {
+		t.Errorf("expected hostname field=%q, got %q", `"h2"`, got)
+	}
+	// service stays a tag throughout (low cardinality).
+	if !strings.Contains(prefix2, "service=svc") {
+		t.Errorf("expected service tag retained, prefix %q", prefix2)
+	}
+}
+
+func TestCardinalityGuardNilAllowsAll(t *testing.T) {
+	var guard *cardinalityGuard // disabled
+	if !guard.allow("hostname", "anything") {
+		t.Error("nil guard should allow all tags")
 	}
 }
 

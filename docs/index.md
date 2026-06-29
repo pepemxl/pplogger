@@ -46,7 +46,9 @@ Features:
 
 - **Daily file handler** — writes JSON records to
   `<log_dir>/<service>.<module>_logs.<YYYY_MM_DD>.log`, creating the directory
-  if needed (`parents=True, exist_ok=True`).
+  if needed (`parents=True, exist_ok=True`). With `rotate_daily=True` a
+  long-running process rolls over to the next day's dated file at midnight;
+  with `max_bytes` it rotates by size instead.
 - **Optional console handler** — when `console=True` (default) the same JSON is
   also streamed to `stdout`.
 - **Level control** — `debug=True` (or the `PPLOGGER_DEBUG` env var) sets the
@@ -115,6 +117,8 @@ unchanged across services:
 | `level` | — | `None` | Explicit level (`int` or name like `"WARNING"`); overrides `debug`. |
 | `max_bytes` | — | `0` | When > 0, rotate the file at this size (`RotatingFileHandler`). |
 | `backup_count` | — | `0` | Number of rotated backups to keep (with `max_bytes`). |
+| `rotate_daily` | — | `False` | Roll to a new date-stamped file at midnight (ignored if `max_bytes` > 0). |
+| `hostname` | `PPLOGGER_HOSTNAME` | host name | Override the `hostname` field. |
 
 Per-logger filtering still works after initialization, e.g.
 `logging.getLogger("noisy.lib").setLevel(logging.WARNING)`.
@@ -259,7 +263,7 @@ processor/pplogger-processor \
 | Context fields (request_id/trace_id) | ✅ | ✅ (promoted to fields) |
 | Env-var configuration | ✅ | ✅ |
 | Debug-level toggle / explicit level | ✅ | — |
-| Size-based file rotation | ✅ | — |
+| File rotation (size + daily/midnight) | ✅ | — |
 | Live tail with rotation handling | — | ✅ |
 | Batched HTTP writes | — | ✅ |
 | Line-protocol mapping & escaping | — | ✅ |

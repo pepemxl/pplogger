@@ -61,6 +61,8 @@ across services.
 | `level`    | —                   | `None`         | Explicit level (int or name); overrides `debug`.     |
 | `max_bytes`| —                   | `0`            | When > 0, rotate the file at this size.              |
 | `backup_count` | —               | `0`            | Rotated backups to keep (with `max_bytes`).          |
+| `rotate_daily` | —               | `False`        | Roll to a new dated file at midnight (if `max_bytes`=0). |
+| `hostname` | `PPLOGGER_HOSTNAME` | host name      | Override the `hostname` field.                       |
 
 ### Context fields
 

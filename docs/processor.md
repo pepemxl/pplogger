@@ -4,11 +4,27 @@
 and ships each record to a time-series database that accepts InfluxDB line
 protocol over HTTP — InfluxDB 1.x/2.x, VictoriaMetrics, QuestDB, etc.
 
-## Build
+## Install
+
+### Prebuilt binaries (no Go toolchain needed)
+
+Each `v*` release attaches static binaries for linux/macOS/Windows
+(amd64 + arm64) to the [GitHub Release](https://github.com/pepemxl/pplogger/releases),
+along with a `checksums.txt`. Download the one for your platform, verify, and run:
+
+```bash
+TAG=v0.0.3
+curl -fsSLO "https://github.com/pepemxl/pplogger/releases/download/${TAG}/pplogger-processor_${TAG}_linux_amd64"
+curl -fsSLO "https://github.com/pepemxl/pplogger/releases/download/${TAG}/checksums.txt"
+sha256sum --ignore-missing -c checksums.txt
+install -m 0755 "pplogger-processor_${TAG}_linux_amd64" /usr/local/bin/pplogger-processor
+```
+
+### Build from source
 
 ```bash
 cd processor
-go build -o pplogger-processor
+go build -o pplogger-processor      # or, fully static: CGO_ENABLED=0 go build -o pplogger-processor
 ```
 
 ## Run

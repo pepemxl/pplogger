@@ -16,6 +16,19 @@ from typing import Any
 
 from pplogger.context import get_context
 
+# Process id is cached to avoid a syscall per record, but refreshed after fork()
+# so child processes report their own pid instead of inheriting the parent's.
+_PID = os.getpid()
+
+
+def _refresh_pid() -> None:
+    global _PID
+    _PID = os.getpid()
+
+
+if hasattr(os, "register_at_fork"):
+    os.register_at_fork(after_in_child=_refresh_pid)
+
 # logging.LogRecord built-in attributes — anything not in this set is treated
 # as user-supplied `extra={...}` and copied into the JSON payload.
 _RESERVED_RECORD_ATTRS = frozenset(
@@ -55,7 +68,6 @@ class JSONFormatter(logging.Formatter):
         self.service = service
         self.module = module
         self.hostname = hostname or socket.gethostname()
-        self.pid = os.getpid()
 
     def format(self, record: logging.LogRecord) -> str:
         timestamp = dt.datetime.fromtimestamp(record.created, tz=dt.timezone.utc)
@@ -67,7 +79,7 @@ class JSONFormatter(logging.Formatter):
             "service": self.service,
             "module": self.module,
             "hostname": self.hostname,
-            "pid": self.pid,
+            "pid": _PID,
             "source_module": record.module,
             "function": record.funcName,
             "line": record.lineno,

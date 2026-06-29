@@ -27,6 +27,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 )
@@ -46,23 +47,41 @@ type config struct {
 	maxRetries      int
 	retryBackoff    time.Duration
 	metricsInterval   time.Duration
+	metricsAddr       string
 	spoolDir          string
 	maxTagCardinality int
 }
 
-// metrics holds running counters for the shipper, logged periodically when
-// --metrics-interval > 0.
+// metrics holds running counters for the shipper. Fields are atomic so the
+// /metrics HTTP handler can read them concurrently with the ship loop. Must be
+// used via pointer (never copied).
 type metrics struct {
-	shipped   int
-	dropped   int
-	malformed int
-	batches   int
-	spooled   int
+	shipped   atomic.Int64
+	dropped   atomic.Int64
+	malformed atomic.Int64
+	batches   atomic.Int64
+	spooled   atomic.Int64
 }
 
-func (m metrics) String() string {
+func (m *metrics) String() string {
 	return fmt.Sprintf("shipped=%d dropped=%d malformed=%d batches=%d spooled=%d",
-		m.shipped, m.dropped, m.malformed, m.batches, m.spooled)
+		m.shipped.Load(), m.dropped.Load(), m.malformed.Load(), m.batches.Load(), m.spooled.Load())
+}
+
+// prometheus renders the counters in Prometheus text exposition format.
+func (m *metrics) prometheus() string {
+	var b strings.Builder
+	write := func(name, help string, v int64) {
+		fmt.Fprintf(&b, "# HELP pplogger_%s %s\n", name, help)
+		fmt.Fprintf(&b, "# TYPE pplogger_%s counter\n", name)
+		fmt.Fprintf(&b, "pplogger_%s %d\n", name, v)
+	}
+	write("shipped_total", "Records successfully shipped to the TSDB.", m.shipped.Load())
+	write("dropped_total", "Records dropped after exhausting retries.", m.dropped.Load())
+	write("malformed_total", "Records skipped because they could not be parsed.", m.malformed.Load())
+	write("batches_total", "Batches successfully written.", m.batches.Load())
+	write("spooled_total", "Records persisted to the spool for later replay.", m.spooled.Load())
+	return b.String()
 }
 
 func parseFlags() config {
@@ -78,6 +97,7 @@ func parseFlags() config {
 	flag.IntVar(&c.maxRetries, "max-retries", 5, "max retries for a failed batch on retryable errors (5xx/429/network)")
 	flag.DurationVar(&c.retryBackoff, "retry-backoff", 500*time.Millisecond, "initial backoff between retries (doubles each attempt, capped at 30s)")
 	flag.DurationVar(&c.metricsInterval, "metrics-interval", 0, "if > 0, periodically log internal counters (shipped/dropped/malformed/batches)")
+	flag.StringVar(&c.metricsAddr, "metrics-addr", os.Getenv("PPLOGGER_METRICS_ADDR"), "if set (e.g. ':9090'), expose Prometheus counters at /metrics on this address")
 	flag.StringVar(&c.spoolDir, "spool-dir", os.Getenv("PPLOGGER_SPOOL_DIR"), "if set, persist batches that exhaust retries to this directory and replay them later (durable at-least-once)")
 	flag.IntVar(&c.maxTagCardinality, "max-tag-cardinality", 0, "if > 0, demote a tag to a field once it exceeds this many distinct values (protects the TSDB)")
 	flag.Parse()
@@ -107,8 +127,36 @@ func main() {
 		go replaySpool(ctx, cfg)
 	}
 
-	if err := ship(ctx, cfg, lines); err != nil {
+	m := &metrics{}
+	if cfg.metricsAddr != "" {
+		go serveMetrics(ctx, cfg.metricsAddr, m)
+	}
+
+	if err := ship(ctx, cfg, lines, m); err != nil {
 		log.Fatalf("shipper exited: %v", err)
+	}
+}
+
+// serveMetrics exposes the counters in Prometheus format at /metrics until the
+// context is cancelled, then shuts the server down gracefully.
+func serveMetrics(ctx context.Context, addr string, m *metrics) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/metrics", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
+		io.WriteString(w, m.prometheus())
+	})
+	srv := &http.Server{Addr: addr, Handler: mux, ReadHeaderTimeout: 5 * time.Second}
+
+	go func() {
+		<-ctx.Done()
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = srv.Shutdown(shutdownCtx)
+	}()
+
+	log.Printf("metrics: serving Prometheus counters at %s/metrics", addr)
+	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		log.Printf("metrics server error: %v", err)
 	}
 }
 
@@ -213,18 +261,18 @@ func tail(ctx context.Context, cfg config, out chan<- []byte) error {
 	}
 }
 
-// ship batches incoming JSON records and POSTs InfluxDB line protocol.
-func ship(ctx context.Context, cfg config, in <-chan []byte) error {
+// ship batches incoming JSON records and POSTs InfluxDB line protocol. Counters
+// are accumulated into m, which the caller may also expose via /metrics.
+func ship(ctx context.Context, cfg config, in <-chan []byte, m *metrics) error {
 	client := &http.Client{Timeout: 10 * time.Second}
 	batch := make([]string, 0, cfg.batchSize)
 	guard := newCardinalityGuard(cfg.maxTagCardinality)
-	var m metrics
 	flush := func() {
 		if len(batch) == 0 {
 			return
 		}
 		body := strings.Join(batch, "\n")
-		records := len(batch)
+		records := int64(len(batch))
 		batch = batch[:0]
 		if err := shipBatch(ctx, client, cfg, body); err != nil {
 			if ctx.Err() != nil {
@@ -234,20 +282,20 @@ func ship(ctx context.Context, cfg config, in <-chan []byte) error {
 			// permanent errors (4xx) never will, so they are dropped outright.
 			if cfg.spoolDir != "" && retryable(err) {
 				if serr := spoolBatch(cfg.spoolDir, body); serr != nil {
-					m.dropped += records
+					m.dropped.Add(records)
 					log.Printf("dropping batch of %d records (spool failed: %v); original: %v", records, serr, err)
 				} else {
-					m.spooled += records
+					m.spooled.Add(records)
 					log.Printf("spooled batch of %d records after retries: %v", records, err)
 				}
 				return
 			}
-			m.dropped += records
+			m.dropped.Add(records)
 			log.Printf("dropping batch of %d records after retries: %v", records, err)
 			return
 		}
-		m.shipped += records
-		m.batches++
+		m.shipped.Add(records)
+		m.batches.Add(1)
 	}
 
 	ticker := time.NewTicker(cfg.flushInterval)
@@ -283,7 +331,7 @@ func ship(ctx context.Context, cfg config, in <-chan []byte) error {
 			}
 			line, err := toLineProtocol(raw, cfg.measurement, guard)
 			if err != nil {
-				m.malformed++
+				m.malformed.Add(1)
 				log.Printf("skip malformed record: %v", err)
 				continue
 			}
